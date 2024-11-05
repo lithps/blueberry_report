@@ -8,7 +8,7 @@ from datetime import date
 import os
 from docx import Document
 from docx.shared import Inches
-
+#
 # Function to fetch stock data
 def fetch_stock_data(ticker, start_date=None, end_date=None, period=None):
     if period:
