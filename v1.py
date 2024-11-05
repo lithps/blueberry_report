@@ -1,22 +1,131 @@
 import pandas as pd
-import numpy as np
+import yfinance as yf
+import matplotlib.pyplot as plt
+from pytz import timezone
+import datetime
 import matplotlib.pyplot as plt
 from datetime import date
 import os
 from docx import Document
 from docx.shared import Inches
 
+# Function to fetch stock data
+def fetch_stock_data(ticker, start_date=None, end_date=None, period=None):
+    if period:
+        return yf.download(ticker, period=period)[['Open', 'Adj Close', 'Volume']]
+    else:
+        return yf.download(ticker, start=start_date, end=None)[['Open', 'Adj Close', 'Volume']]
+
+# Fetch LINE stock info
+ticker = 'LINE'
+LINE_stock_data = fetch_stock_data(ticker, period='max')
+LINE_stock_data.index = LINE_stock_data.index.tz_localize(None)
+start_date = LINE_stock_data.index.min()
+
+# Ensure the datetime index is timezone-naive
+LINE_stock_data.columns = ['Open', 'Adj Close', 'Volume']
+
+# Fetch peer stock info
+peer_data = pd.read_csv('/home/josh/blueberry_report/peers.csv')
+peer_tickers = peer_data['Ticker'].tolist()
+
+# Initialize an empty list to store dataframes
+dataframes = []
+
+# Loop through each ticker to download and rename the data
+for ticker in peer_tickers:
+    # Download the stock data
+    ticker_data = fetch_stock_data(ticker, start_date=start_date, end_date=None)
+    
+    # Rename the columns
+    ticker_data.columns = [f'{ticker}_{col}' for col in ['Open', 'Adj Close', 'Volume']]
+    
+    # Append the dataframe to the list
+    dataframes.append(ticker_data)
+
+# Concatenate peer dataframes
+combined_peer_data = pd.concat(dataframes, axis=1)
+combined_peer_data.index = combined_peer_data.index.tz_localize(None)
+
+# Combine LINE ticker with peer tickers
+all_tickers = peer_tickers + ['LINE']
+unique_tickers = set(all_tickers)
+
+# Initialize lists to store shares outstanding and earnings dates
+shares_outstanding_list = []
+earnings_dates_list = []
+net_income_list = []
+
+# Fetch shares outstanding and earnings dates for each ticker
+for t in unique_tickers:
+    stock = yf.Ticker(t)
+    shares_outstanding = stock.info.get('sharesOutstanding', None)
+    net_income = stock.financials.loc['Net Income'].iloc[0] if not stock.financials.empty else None
+    
+    # Fetch historical earnings dates
+    earnings_dates = stock.earnings_dates
+    if not earnings_dates.empty:
+        # Convert pd.Timestamp.today() to a timezone-aware datetime
+        tz = timezone('America/New_York')
+        today_tz_aware = pd.Timestamp.now(tz)
+
+        # Filter out future dates
+        past_earnings_dates = earnings_dates[earnings_dates.index <= today_tz_aware]
+        latest_earnings_date = past_earnings_dates.index[0].date() if not past_earnings_dates.empty else None
+    else:
+        latest_earnings_date = None
+    
+    shares_outstanding_list.append({
+        'Ticker': t,
+        'Latest Earnings Date': latest_earnings_date,
+        'Shares Outstanding': shares_outstanding,
+        'Net Income': net_income
+    })
+
+# Create DataFrame for shares outstanding
+financials_df = pd.DataFrame(shares_outstanding_list)
+financials_df.set_index('Ticker', inplace=True)
+financials_df.index = financials_df.index.astype(str)
+
+# Rename columns
+LINE_stock_data.columns = [f'LINE_{col}' for col in LINE_stock_data.columns]
+
+
+# Concatenate the dataframes
+combined_data = pd.concat([LINE_stock_data, combined_peer_data], axis=1)
+
+for ticker in unique_tickers:
+    # Calculate vol %
+    vol_col = f'{ticker}_Volume'
+    vol_per_col = f'{ticker}_Vol_%'
+    if vol_col in combined_data:
+        combined_data[vol_per_col] = (combined_data[vol_col]/financials_df.loc[ticker, 'Shares Outstanding']) * 100
+
+# Loop through each ticker to calculate EPS
+for ticker in unique_tickers:
+    eps_col = f'{ticker}_EPS'
+    if ticker in financials_df.index:
+        combined_data[eps_col] = financials_df.loc[ticker, 'Net Income'] / financials_df.loc[ticker, 'Shares Outstanding']
+
+# Loop through each ticker to calculate P/E ratio
+for ticker in unique_tickers:
+    close_col = f'{ticker}_Adj Close'
+    eps_col = f'{ticker}_EPS'
+    PE_col = f'{ticker}_P/E_Ratio'
+    if eps_col in combined_data.columns:
+        combined_data[PE_col] = (combined_data[close_col] / combined_data[eps_col])
+
+# Filter out NaN and print the updated combined_data DataFrame
+filtered_combined_data = combined_data.dropna()
+
 # Grab today's date and create folder for report
 today = date.today()
 folder_name = today.strftime("%Y-%m-%d")
-report_path = os.path.join('/home/joshavery/code_projects/LINE_automatic_report/final_reports', folder_name)
+report_path = os.path.join('/home/josh/blueberry_report/finished_reports', folder_name)
 os.makedirs(report_path, exist_ok=True)
 
 # Load the CSV file into a DataFrame
-df = pd.read_csv('/home/joshavery/code_projects/LINE_automatic_report/combined_stock_data.csv')
-# Set date as index
-df['Date'] = pd.to_datetime(df['Date'])
-df.set_index('Date', inplace=True)
+df = filtered_combined_data
 
 # Create volume % df
 vol_percent = df.filter(like='Vol_%')
@@ -124,7 +233,7 @@ if pe_image:
     })
 
 # Load the Word document
-template = Document('/home/joshavery/code_projects/LINE_automatic_report/final_reports/report_template.docx')
+template = Document('/home/josh/blueberry_report/template_report.docx')
 
 # Replace text tags in the document
 for tag, value in template_tags.items():
